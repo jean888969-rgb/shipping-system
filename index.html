@@ -83,7 +83,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;ba
 .modal-confirm-red{background:#c00;color:#fff;}
 .modal-confirm-blue{background:#534AB7;color:#fff;}
 .modal-confirm-green{background:#28a745;color:#fff;}
-.loading{text-align:center;padding:32px;color:#888;font-size:14px;}
+.loading-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:12px;}
+.loading-spinner{width:36px;height:36px;border:3px solid #e5e5e5;border-top-color:#534AB7;border-radius:50%;animation:spin 0.8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.loading-text{font-size:14px;color:#888;}
 .inv-total-box{background:#EEEDFE;border-radius:12px;padding:14px;margin:0 0 12px;display:flex;justify-content:space-between;align-items:center;}
 .inv-total-label{font-size:13px;color:#3C3489;}
 .inv-total-val{font-size:22px;font-weight:700;color:#3C3489;}
@@ -103,9 +106,10 @@ input[type=date]{border:1px solid #e5e5e5;border-radius:8px;padding:8px 10px;fon
 .inv-record-bottom{display:flex;align-items:center;justify-content:space-between;}
 .inv-record-info{font-size:12px;color:#888;}
 .inv-record-actions{display:flex;gap:6px;}
+.saving-bar{background:#534AB7;color:#fff;text-align:center;padding:8px;font-size:13px;position:fixed;top:0;left:0;right:0;z-index:500;}
 
 @media print {
-  body > *{display:none !important;}
+  body>*{display:none !important;}
   #print-area{display:block !important;padding:20px;font-family:'微軟正黑體','Microsoft JhengHei',sans-serif;}
   .print-header{text-align:center;border-bottom:2px solid #000;padding-bottom:12px;margin-bottom:16px;}
   .print-company{font-size:22px;font-weight:700;margin-bottom:4px;}
@@ -125,7 +129,7 @@ input[type=date]{border:1px solid #e5e5e5;border-radius:8px;padding:8px 10px;fon
 </style>
 </head>
 <body>
-<div id="app"></div>
+<div id="app"><div class="loading-screen"><div class="loading-spinner"></div><div class="loading-text">系統載入中...</div></div></div>
 <div id="print-area"></div>
 <script>
 const API = 'https://script.google.com/macros/s/AKfycbyoeU1O76SJXych5ZHBilpPuiD1JqZUCECJ21sbdgZc0JYaNZu3WwPEX5BR5IdxzkePeA/exec';
@@ -134,13 +138,14 @@ const MY_COMPANY = '裕元企業社';
 let state = {
   page: 'home',
   customers: [],
+  itemMap: {},
   shipments: [],
   invoices: [],
+  nextNo: '',
   newShipment: { customer: '', date: today(), items: [], note: '' },
   selectedShipment: null,
   selectedShipmentStatus: null,
   showItemSheet: false,
-  availableItems: [],
   showVoidModal: false,
   showUnvoidModal: false,
   showPaymentModal: false,
@@ -148,19 +153,20 @@ let state = {
   paymentDate: today(),
   paymentMethod: '',
   invoiceCustomer: '',
-  loading: false
+  saving: false,
+  ready: false
 };
 
 function today() { return new Date().toISOString().split('T')[0]; }
 
 function toROC(dateStr) {
   const d = new Date(dateStr);
-  return '民國 ' + (d.getFullYear()-1911) + ' 年 ' + (d.getMonth()+1) + ' 月';
+  return '民國 '+(d.getFullYear()-1911)+' 年 '+(d.getMonth()+1)+' 月';
 }
 
 function toROCFull(dateStr) {
   const d = new Date(dateStr);
-  return '民國 ' + (d.getFullYear()-1911) + ' 年 ' + (d.getMonth()+1) + ' 月 ' + d.getDate() + ' 日';
+  return '民國 '+(d.getFullYear()-1911)+' 年 '+(d.getMonth()+1)+' 月 '+d.getDate()+' 日';
 }
 
 async function api(params) {
@@ -170,24 +176,15 @@ async function api(params) {
   return json.result;
 }
 
-async function loadData() {
-  state.loading = true; render();
-  const [customers, shipments, invoices] = await Promise.all([
-    api({ action: 'getCustomers' }),
-    api({ action: 'getShipments' }),
-    api({ action: 'getInvoices' })
-  ]);
-  state.customers = customers;
-  state.shipments = shipments;
-  state.invoices = invoices;
-  state.loading = false;
-  render();
-}
-
-async function loadItems(customer) {
-  const items = await api({ action: 'getItems', customer });
-  state.availableItems = items;
-  state.showItemSheet = true;
+// 只在啟動時載入一次所有資料
+async function init() {
+  const data = await api({ action: 'init' });
+  state.customers = data.customers;
+  state.itemMap = data.itemMap;
+  state.shipments = data.shipments;
+  state.invoices = data.invoices;
+  state.nextNo = data.nextNo;
+  state.ready = true;
   render();
 }
 
@@ -195,41 +192,51 @@ async function saveShipment() {
   if (!state.newShipment.customer) return alert('請選擇客戶');
   if (state.newShipment.items.length === 0) return alert('請新增品項');
   if (state.newShipment.items.some(i => !i.qty || i.qty <= 0)) return alert('請填寫所有品項數量');
-  state.loading = true; render();
-  const no = await api({ action: 'getNextNo' });
-  await api({
-    action: 'saveShipment', no,
-    date: state.newShipment.date,
-    customer: state.newShipment.customer,
-    items: JSON.stringify(state.newShipment.items),
-    note: state.newShipment.note
+
+  const no = state.nextNo;
+  const s = state.newShipment;
+
+  // 立刻更新本地狀態，不等API
+  s.items.forEach(item => {
+    state.shipments.unshift({
+      no, date: s.date, customer: s.customer,
+      item: item.name, qty: item.qty, price: item.price,
+      subtotal: item.qty * item.price, status: '待請款', note: s.note
+    });
   });
+
+  // 更新下一個流水號
+  const parts = no.split('-');
+  state.nextNo = parts[0] + '-' + String(parseInt(parts[1]) + 1).padStart(3, '0');
   state.newShipment = { customer: '', date: today(), items: [], note: '' };
-  await loadData();
   state.page = 'records';
-  state.loading = false;
-  alert('出貨單 ' + no + ' 儲存成功！');
+  render();
+
+  // 背景儲存
+  state.saving = true; render();
+  await api({ action: 'saveShipment', no, date: s.date, customer: s.customer, items: JSON.stringify(s.items), note: s.note });
+  state.saving = false;
   render();
 }
 
 async function voidShipment() {
-  state.loading = true; render();
-  await api({ action: 'voidShipment', no: state.selectedShipment });
+  const no = state.selectedShipment;
+  // 立刻更新本地
+  state.shipments.filter(s => s.no === no).forEach(s => s.status = '作廢');
   state.showVoidModal = false;
   state.selectedShipment = null;
-  await loadData();
-  state.loading = false;
   render();
+  // 背景儲存
+  await api({ action: 'voidShipment', no });
 }
 
 async function unvoidShipment() {
-  state.loading = true; render();
-  await api({ action: 'unvoidShipment', no: state.selectedShipment });
+  const no = state.selectedShipment;
+  state.shipments.filter(s => s.no === no).forEach(s => s.status = '待請款');
   state.showUnvoidModal = false;
   state.selectedShipment = null;
-  await loadData();
-  state.loading = false;
   render();
+  await api({ action: 'unvoidShipment', no });
 }
 
 async function saveInvoice() {
@@ -237,38 +244,38 @@ async function saveInvoice() {
   if (rows.length === 0) return alert('沒有待請款紀錄');
   const groups = groupShipments(rows);
   const total = getTotalAmt(rows);
+  const nos = groups.map(g => g.no).join(',');
+
+  // 先列印
   printInvoiceData(rows, groups, total);
-  state.loading = true; render();
-  const invoiceNo = await api({
-    action: 'saveInvoice',
-    date: today(),
-    customer: state.invoiceCustomer,
-    totalAmt: total,
-    shipmentNos: groups.map(g => g.no).join(','),
-    details: JSON.stringify(rows)
+
+  // 立刻更新本地狀態
+  const invoiceNo = 'INV-' + new Date().getFullYear() + '-' + String(state.invoices.length + 1).padStart(3, '0');
+  state.shipments.filter(s => nos.split(',').includes(s.no + '')).forEach(s => s.status = '已請款');
+  state.invoices.unshift({
+    invoiceNo, date: today(), customer: state.invoiceCustomer,
+    totalAmt: total, shipmentNos: nos, itemCount: rows.length,
+    status: '已請款', receiveDate: '', receiveMethod: ''
   });
-  await loadData();
-  state.loading = false;
-  alert('請款單 ' + invoiceNo + ' 已儲存！');
+  render();
+
+  // 背景儲存
+  state.saving = true; render();
+  await api({ action: 'saveInvoice', date: today(), customer: state.invoiceCustomer, totalAmt: total, shipmentNos: nos, details: JSON.stringify(rows) });
+  state.saving = false;
   render();
 }
 
 async function confirmPayment() {
   if (!state.paymentMethod) return alert('請選擇收款方式');
-  state.loading = true; render();
-  await api({
-    action: 'confirmPayment',
-    invoiceNo: state.paymentInvoiceNo,
-    receiveDate: state.paymentDate,
-    receiveMethod: state.paymentMethod
-  });
+  const invNo = state.paymentInvoiceNo;
+  const inv = state.invoices.find(i => i.invoiceNo === invNo);
+  if (inv) { inv.status = '已收款'; inv.receiveDate = state.paymentDate; inv.receiveMethod = state.paymentMethod; }
   state.showPaymentModal = false;
   state.paymentInvoiceNo = '';
   state.paymentMethod = '';
-  state.paymentDate = today();
-  await loadData();
-  state.loading = false;
   render();
+  await api({ action: 'confirmPayment', invoiceNo: invNo, receiveDate: state.paymentDate, receiveMethod: state.paymentMethod });
 }
 
 function printInvoiceByNo(invoiceNo) {
@@ -277,65 +284,43 @@ function printInvoiceByNo(invoiceNo) {
   const nos = (inv.shipmentNos + '').split(',');
   const rows = state.shipments.filter(s => nos.includes(s.no + ''));
   const groups = groupShipments(rows);
-  const total = Number(inv.totalAmt);
-  printInvoiceData(rows, groups, total, inv.customer, inv.date);
+  printInvoiceData(rows, groups, Number(inv.totalAmt), inv.customer, inv.date);
 }
 
 function printInvoiceData(rows, groups, total, customer, date) {
   const cust = customer || state.invoiceCustomer;
   const dt = date || today();
-  let tableRows = '';
-  let idx = 1;
+  let tableRows = ''; let idx = 1;
   groups.forEach(g => {
     g.items.forEach(item => {
-      tableRows += `<tr>
-        <td>${idx++}</td>
-        <td class="left">${item.item}</td>
-        <td>${item.qty}</td>
-        <td>$${Number(item.price).toLocaleString()}</td>
-        <td>$${Number(item.subtotal).toLocaleString()}</td>
-        <td>${toROCFull(g.date)}</td>
-      </tr>`;
+      tableRows += `<tr><td>${idx++}</td><td class="left">${item.item}</td><td>${item.qty}</td><td>$${Number(item.price).toLocaleString()}</td><td>$${Number(item.subtotal).toLocaleString()}</td><td>${toROCFull(g.date)}</td></tr>`;
     });
   });
   document.getElementById('print-area').innerHTML = `
-    <div class="print-header">
-      <div class="print-company">${MY_COMPANY}</div>
-      <div class="print-title">請　款　單</div>
-    </div>
+    <div class="print-header"><div class="print-company">${MY_COMPANY}</div><div class="print-title">請　款　單</div></div>
     <div class="print-meta">
-      <div class="print-meta-left">
-        <div>請款對象：${cust}</div>
-        <div>請款月份：${toROC(dt)}</div>
-      </div>
-      <div class="print-meta-right">
-        <div>開立日期：${toROCFull(dt)}</div>
-        <div>出貨單數：${groups.length} 張</div>
-      </div>
+      <div class="print-meta-left"><div>請款對象：${cust}</div><div>請款月份：${toROC(dt)}</div></div>
+      <div class="print-meta-right"><div>開立日期：${toROCFull(dt)}</div><div>出貨單數：${groups.length} 張</div></div>
     </div>
     <table class="print-table">
       <thead><tr><th>項次</th><th>品項名稱</th><th>數量</th><th>單價</th><th>小計</th><th>出貨日期</th></tr></thead>
       <tbody>${tableRows}</tbody>
     </table>
     <div class="print-total">請款總金額：$${total.toLocaleString()} 元整</div>
-    <div class="print-sign">
-      <div class="print-sign-item">製單</div>
-      <div class="print-sign-item">核准</div>
-      <div class="print-sign-item">收款確認</div>
-    </div>`;
+    <div class="print-sign"><div class="print-sign-item">製單</div><div class="print-sign-item">核准</div><div class="print-sign-item">收款確認</div></div>`;
   window.print();
 }
 
 function getMonthShipments() {
   const m = new Date().toISOString().slice(0,7);
-  return state.shipments.filter(s => (s.date+'').slice(0,7) === m && s.status !== '作廢');
+  return state.shipments.filter(s => (s.date+'').slice(0,7)===m && s.status!=='作廢');
 }
 
-function getTotalAmt(rows) { return rows.reduce((s,r) => s + (Number(r.subtotal)||0), 0); }
+function getTotalAmt(rows) { return rows.reduce((s,r) => s+(Number(r.subtotal)||0), 0); }
 
 function getInvoiceRows() {
   if (!state.invoiceCustomer) return [];
-  return state.shipments.filter(s => s.customer === state.invoiceCustomer && s.status === '待請款');
+  return state.shipments.filter(s => s.customer===state.invoiceCustomer && s.status==='待請款');
 }
 
 function groupShipments(rows) {
@@ -345,7 +330,7 @@ function groupShipments(rows) {
     map[r.no].total += Number(r.subtotal)||0;
     map[r.no].items.push(r);
   });
-  return Object.values(map).sort((a,b) => b.no > a.no ? 1 : -1);
+  return Object.values(map).sort((a,b) => b.no>a.no?1:-1);
 }
 
 function render() {
@@ -354,8 +339,10 @@ function render() {
 }
 
 function buildApp() {
-  if (state.loading) return '<div class="loading">載入中...</div>';
-  let html = buildNav() + buildPages();
+  if (!state.ready) return '<div class="loading-screen"><div class="loading-spinner"></div><div class="loading-text">系統載入中...</div></div>';
+  let html = '';
+  if (state.saving) html += '<div class="saving-bar">儲存中...</div>';
+  html += buildNav() + buildPages();
   if (state.showItemSheet) html += buildItemSheet();
   if (state.showVoidModal) html += buildVoidModal();
   if (state.showUnvoidModal) html += buildUnvoidModal();
@@ -369,9 +356,8 @@ function buildNav() {
     {id:'new',icon:'📦',label:'新增'},
     {id:'records',icon:'📋',label:'紀錄'},
     {id:'invoice',icon:'💰',label:'請款'}
-  ].map(p => `<button class="nav-item ${state.page===p.id?'active':''}" onclick="setPage('${p.id}')">
-    <span class="nav-icon">${p.icon}</span>
-    <span class="nav-label">${p.label}</span>
+  ].map(p=>`<button class="nav-item ${state.page===p.id?'active':''}" onclick="setPage('${p.id}')">
+    <span class="nav-icon">${p.icon}</span><span class="nav-label">${p.label}</span>
   </button>`).join('')}</nav>`;
 }
 
@@ -387,7 +373,7 @@ function buildHome() {
   const month = getMonthShipments();
   const groups = groupShipments(month);
   const total = getTotalAmt(month);
-  const pending = getTotalAmt(month.filter(s => s.status==='待請款'));
+  const pending = getTotalAmt(month.filter(s=>s.status==='待請款'));
   return `
     <div class="topbar"><span class="topbar-title">出貨請款系統</span></div>
     <div class="content">
@@ -398,8 +384,8 @@ function buildHome() {
       </div>
       <div class="card">
         <div class="card-header"><span class="card-title">最近出貨紀錄</span></div>
-        ${groups.length===0 ? '<div class="empty">本月尚無出貨紀錄</div>' :
-          groups.slice(0,5).map(g => `
+        ${groups.length===0?'<div class="empty">本月尚無出貨紀錄</div>':
+          groups.slice(0,5).map(g=>`
             <div class="list-row">
               <div class="list-no">${g.no}</div>
               <div class="list-info"><div class="list-client">${g.customer}</div><div class="list-date">${g.date}</div></div>
@@ -414,7 +400,7 @@ function buildHome() {
 
 function buildNew() {
   const s = state.newShipment;
-  const total = s.items.reduce((sum,i) => sum+(i.qty*i.price||0), 0);
+  const total = s.items.reduce((sum,i)=>sum+(i.qty*i.price||0),0);
   return `
     <div class="topbar"><span class="topbar-title">新增出貨單</span></div>
     <div class="content">
@@ -425,24 +411,26 @@ function buildNew() {
         <div class="row"><span class="row-label">出貨日期</span>
           <input type="date" value="${s.date}" id="inp-date" style="border:none;font-size:14px;flex:1;outline:none;">
         </div>
+        <div class="row"><span class="row-label">單號</span>
+          <span class="row-val" style="color:#534AB7;font-weight:600;">${state.nextNo}</span>
+        </div>
       </div>
       <div class="card">
         <div class="card-header">
           <span class="card-title">出貨品項（${s.items.length} 項）</span>
-          ${s.customer ? `<button class="btn-small" id="btn-add-item">+ 新增品項</button>` : ''}
+          ${s.customer?`<button class="btn-small" id="btn-add-item">+ 新增品項</button>`:''}
         </div>
-        ${s.items.length===0 ? `<div class="empty">${s.customer?'點右上角新增品項':'請先選擇客戶'}</div>` :
-          s.items.map((item,i) => `
+        ${s.items.length===0?`<div class="empty">${s.customer?'點右上角新增品項':'請先選擇客戶'}</div>`:
+          s.items.map((item,i)=>`
             <div class="item-row">
               <div class="item-info"><div class="item-name">${item.name}</div><div class="item-price">$${item.price} / 個</div></div>
-              <div class="qty-box">
-                <span class="qty-label">數量</span>
+              <div class="qty-box"><span class="qty-label">數量</span>
                 <input class="qty-input" type="number" inputmode="numeric" value="${item.qty||''}" data-idx="${i}" placeholder="0">
               </div>
               <div class="item-subtotal">$${((item.qty||0)*item.price).toLocaleString()}</div>
               <button class="del-btn" data-del="${i}">×</button>
             </div>`).join('')}
-        ${s.items.length>0 ? `<div class="total-bar"><span class="total-label">合計</span><span class="total-val">$${total.toLocaleString()}</span></div>` : ''}
+        ${s.items.length>0?`<div class="total-bar"><span class="total-label">合計</span><span class="total-val">$${total.toLocaleString()}</span></div>`:''}
       </div>
       <div class="card">
         <div class="row"><span class="row-label">備註</span>
@@ -457,51 +445,49 @@ function buildRecords() {
   const groups = groupShipments(state.shipments);
   return `
     <div class="topbar"><span class="topbar-title">出貨紀錄</span></div>
-    <div class="content">
-      <div class="card">
-        ${groups.length===0 ? '<div class="empty">尚無出貨紀錄</div>' :
-          groups.map(g => `
-            <div class="list-row" data-no="${g.no}" data-status="${g.status}">
-              <div class="list-no">${g.no}</div>
-              <div class="list-info">
-                <div class="list-client">${g.customer}</div>
-                <div class="list-date">${g.date} · ${g.items.map(i=>i.item+'×'+i.qty).join(', ')}</div>
-              </div>
-              <div class="list-right">
-                <div class="list-amt ${g.status==='作廢'?'void':''}">$${g.total.toLocaleString()}</div>
-                <span class="badge badge-${g.status==='待請款'?'pending':g.status==='作廢'?'void':'ok'}">${g.status}</span>
-              </div>
-            </div>`).join('')}
-      </div>
-    </div>`;
+    <div class="content"><div class="card">
+      ${groups.length===0?'<div class="empty">尚無出貨紀錄</div>':
+        groups.map(g=>`
+          <div class="list-row" data-no="${g.no}" data-status="${g.status}">
+            <div class="list-no">${g.no}</div>
+            <div class="list-info">
+              <div class="list-client">${g.customer}</div>
+              <div class="list-date">${g.date} · ${g.items.map(i=>i.item+'×'+i.qty).join(', ')}</div>
+            </div>
+            <div class="list-right">
+              <div class="list-amt ${g.status==='作廢'?'void':''}">$${g.total.toLocaleString()}</div>
+              <span class="badge badge-${g.status==='待請款'?'pending':g.status==='作廢'?'void':'ok'}">${g.status}</span>
+            </div>
+          </div>`).join('')}
+    </div></div>`;
 }
 
 function buildInvoice() {
   const rows = getInvoiceRows();
   const groups = groupShipments(rows);
   const total = getTotalAmt(rows);
-  const pendingInvoices = state.invoices.filter(i => i.status === '已請款');
-  const receivedInvoices = state.invoices.filter(i => i.status === '已收款');
+  const pendingInv = state.invoices.filter(i=>i.status==='已請款');
+  const receivedInv = state.invoices.filter(i=>i.status==='已收款');
   return `
     <div class="topbar"><span class="topbar-title">請款管理</span></div>
     <div class="content">
       <div class="card">
         <div class="card-header"><span class="card-title">選擇客戶產出請款單</span></div>
-        ${state.customers.map(c => `
+        ${state.customers.map(c=>`
           <div class="select-btn" data-inv-customer="${c}">
             <span class="select-btn-name ${state.invoiceCustomer===c?'select-active':''}">${c}</span>
             ${state.invoiceCustomer===c?'<span style="color:#534AB7">✓</span>':''}
           </div>`).join('')}
       </div>
-      ${state.invoiceCustomer ? `
+      ${state.invoiceCustomer?`
         <div class="inv-total-box">
           <span class="inv-total-label">${state.invoiceCustomer} 待請款</span>
           <span class="inv-total-val">$${total.toLocaleString()}</span>
         </div>
         <div class="card">
           <div class="card-header"><span class="card-title">待請款出貨明細</span></div>
-          ${groups.length===0 ? '<div class="empty">無待請款紀錄</div>' :
-            groups.map(g => `
+          ${groups.length===0?'<div class="empty">無待請款紀錄</div>':
+            groups.map(g=>`
               <div class="list-row">
                 <div class="list-no">${g.no}</div>
                 <div class="list-info">
@@ -511,13 +497,12 @@ function buildInvoice() {
                 <div class="list-right"><div class="list-amt">$${g.total.toLocaleString()}</div></div>
               </div>`).join('')}
         </div>
-        ${groups.length>0 ? `<button class="btn-primary" id="btn-save-invoice">儲存並列印請款單</button>` : ''}
-      ` : ''}
-
-      ${pendingInvoices.length>0 ? `
+        ${groups.length>0?`<button class="btn-primary" id="btn-save-invoice">儲存並列印請款單</button>`:''}
+      `:''}
+      ${pendingInv.length>0?`
         <div class="card" style="margin-top:16px;">
           <div class="card-header"><span class="card-title">已請款（待收款）</span></div>
-          ${pendingInvoices.map(inv => `
+          ${pendingInv.map(inv=>`
             <div class="inv-record-row">
               <div class="inv-record-top">
                 <span class="inv-record-no">${inv.invoiceNo}</span>
@@ -531,12 +516,11 @@ function buildInvoice() {
                 </div>
               </div>
             </div>`).join('')}
-        </div>` : ''}
-
-      ${receivedInvoices.length>0 ? `
+        </div>`:''}
+      ${receivedInv.length>0?`
         <div class="card" style="margin-top:8px;">
           <div class="card-header"><span class="card-title">已收款紀錄</span></div>
-          ${receivedInvoices.map(inv => `
+          ${receivedInv.map(inv=>`
             <div class="inv-record-row">
               <div class="inv-record-top">
                 <span class="inv-record-no">${inv.invoiceNo}</span>
@@ -547,26 +531,26 @@ function buildInvoice() {
                 <button class="btn-small" data-reprint="${inv.invoiceNo}">列印</button>
               </div>
             </div>`).join('')}
-        </div>` : ''}
+        </div>`:''}
     </div>`;
 }
 
 function buildItemSheet() {
-  const added = state.newShipment.items.map(i => i.name);
+  const added = state.newShipment.items.map(i=>i.name);
+  const items = state.itemMap[state.newShipment.customer] || [];
   return `
     <div class="sheet-overlay" id="sheet-overlay">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <div class="sheet-title">${state.newShipment.customer} — 品項清單</div>
-        ${state.availableItems.map(item => `
+        ${items.map(item=>`
           <div class="sheet-item">
             <div class="sheet-item-info">
               <div class="sheet-item-name">${item.name}</div>
               <div class="sheet-item-price">$${item.price} / 個</div>
             </div>
-            ${added.includes(item.name)
-              ? '<span class="sheet-added">已加入</span>'
-              : `<button class="sheet-add-btn" data-item='${JSON.stringify(item)}'>加入</button>`}
+            ${added.includes(item.name)?'<span class="sheet-added">已加入</span>':
+              `<button class="sheet-add-btn" data-item='${JSON.stringify(item)}'>加入</button>`}
           </div>`).join('')}
       </div>
     </div>`;
@@ -621,7 +605,7 @@ function bindEvents() {
   const inpNote = document.getElementById('inp-note');
   if (inpNote) inpNote.oninput = e => { state.newShipment.note = e.target.value; };
   const btnAddItem = document.getElementById('btn-add-item');
-  if (btnAddItem) btnAddItem.onclick = () => loadItems(state.newShipment.customer);
+  if (btnAddItem) btnAddItem.onclick = () => { state.showItemSheet = true; render(); };
   const btnSave = document.getElementById('btn-save');
   if (btnSave) btnSave.onclick = saveShipment;
   const btnSaveInvoice = document.getElementById('btn-save-invoice');
@@ -643,8 +627,8 @@ function bindEvents() {
     row.onclick = () => {
       state.selectedShipment = row.getAttribute('data-no');
       state.selectedShipmentStatus = row.getAttribute('data-status');
-      if (row.getAttribute('data-status') === '作廢') { state.showUnvoidModal = true; }
-      else { state.showVoidModal = true; }
+      if (row.getAttribute('data-status')==='作廢') state.showUnvoidModal = true;
+      else state.showVoidModal = true;
       render();
     };
   });
@@ -698,7 +682,7 @@ function showCustomerSheet() {
   overlay.innerHTML = `<div class="sheet">
     <div class="sheet-handle"></div>
     <div class="sheet-title">選擇客戶</div>
-    ${state.customers.map(c => `<div class="sheet-item" style="cursor:pointer" data-cust="${c}">
+    ${state.customers.map(c=>`<div class="sheet-item" style="cursor:pointer" data-cust="${c}">
       <div class="sheet-item-info"><div class="sheet-item-name">${c}</div></div>
     </div>`).join('')}
   </div>`;
@@ -711,7 +695,7 @@ function showCustomerSheet() {
 }
 
 function setPage(p) { state.page=p; render(); }
-loadData();
+init();
 </script>
 </body>
 </html>
